@@ -18,13 +18,11 @@ resettime() = global RunningTime = now()
 
 @enum PlotType begin
     NoPlot
-    LinePlot
+    AltLinePlot
 end
 
-struct FixedLengthReader
-    length::Integer
-end
-
+#Override the stream reader to read fixed length chunks
+struct FixedLengthReader length::Integer end
 function Base.take!(r::FixedLengthReader, data, len)
     if length(data) >= r.length
         len[] = r.length
@@ -38,26 +36,29 @@ mutable struct Information
     plotType::PlotType
     plot
     plot_pos
+    displaynum
 
-    Information(name, plotType, plos_pos) = new(name, plotType, nothing, plos_pos)
+    displayf32num(n) = round(n, digits=2)
+    Information(name, plotType, plos_pos, displaynum = displayf32num) = new(name, plotType, nothing, plos_pos, displaynum)
+    Information(name, displaynum = displayf32num) = new(name, NoPlot, nothing, displaynum)
 end
 
 mutable struct Payload
     name
     color
-    packet_time     #The Actual Observable
+    observable          #Holds the altitude just for ease of use
     packet
     prevpacket
 
     Payload(name, color) = new(name, color, Observable(0.0), zeros(Float64, length(information)), zeros(Float64, length(information)))
-    Observables.notify(p::Payload) = notify(p.packet_time)
-    Observables.on(f, p::Payload) = on(f, p.packet_time)
+    Observables.notify(p::Payload) = notify(p.observable)
+    Observables.on(f, p::Payload) = on(f, p.observable)
 end
 
-information = [Information("Time", NoPlot, -1),                         Information("Longitude", LinePlot, (1, 3)),                 Information("Latitude", LinePlot, (1, 2)), 
-               Information("Altitude [km]", LinePlot, (1, 1)),          Information("Temp [∘C]", LinePlot, (2, 2)),                 Information("Pressure [atm]", LinePlot, (2, 3)),      
-               Information("Ascent Vel [m/s]", LinePlot, (2, 1)),       Information("North Vel [m/s]", LinePlot, (3, 2)),           Information("Horiz Vel [m/s]", LinePlot, (3, 3)),
-               Information("EastVel", LinePlot, (3, 1)),                Information("RSSI", NoPlot, -1),                            Information("Sat", NoPlot, -1)]
+information = [Information("Time", t -> Dates.format(DateTime(Int(t), UTC), "HH::MM::SS")),  Information("Longitude"),          Information("Latitude"), 
+               Information("Altitude [km]"),                             Information("Temp [∘C]", AltLinePlot, (1, 1)),         Information("Pressure [atm]", AltLinePlot, (1, 2)),      
+               Information("Ascent Vel [m/s]", AltLinePlot, (2, 1)),     Information("North Vel [m/s]", AltLinePlot, (2, 2)),   Information("Horiz Vel [m/s]", AltLinePlot, (3, 1)),
+               Information("EastVel", AltLinePlot, (3, 2)),              Information("RSSI"),                                   Information("Sat", Int)]
 
 payloads = GtkJuliaList(Payload[])     
 ids2payloads = Dict{Int, Payload}()  
@@ -76,8 +77,8 @@ function create_plot(plots, plot3d, gui)
     fig3D = Figure()
 
     for info in information
-        if info.plotType == LinePlot
-            info.plot = Axis(fig[info.plot_pos...], xlabel = "Time [s]", ylabel = info.name)
+        if info.plotType == AltLinePlot
+            info.plot = Axis(fig[info.plot_pos...], xlabel = info.name, ylabel = "Altitude [km]")
         end
     end
 
@@ -94,13 +95,13 @@ function create_plot(plots, plot3d, gui)
     gui[:connect_payload_to_plots] = function connect_payload_to_plots(p::Payload)
         for idx in eachindex(information)
             info = information[idx]
-            if info.plotType == LinePlot
+            if info.plotType == AltLinePlot
                 plot_data = Observable(Point2f[])
                 lines!(info.plot, plot_data, color=p.color, label=p.name)
-                on(p) do t
-                    push!(plot_data[], Point2f((t, p.packet[idx])))
-                    autolimits!(info.plot)
+                on(p) do a
+                    push!(plot_data[], Point2f((p.packet[idx], a)))
                     notify(plot_data)
+                    autolimits!(info.plot)
                 end
             end
         end
@@ -109,7 +110,7 @@ function create_plot(plots, plot3d, gui)
         apos = Observable(Point3f[])
         scatter!(ax3, pos, color=p.color, markersize=25, label=p.name)                        #Sphere    
         lines!(ax3, apos; color=p.color)                                                      #Trajectory
-        on(p) do t
+        on(p) do a
             pos[] = Point3f(p.packet[2], p.packet[3], p.packet[4])
             push!(apos[], pos[])
             notify(apos)
@@ -125,7 +126,8 @@ function create_column_view()
     append!(payload_cv, cv)
     
     for n in eachindex(information)
-        cv = GtkJuliaColumnViewColumn(payloads, information[n].name, () -> GtkLabel(""), (l, p) -> on(t -> l[] = round(p.packet[n], digits=2), p))
+        info = information[n]
+        cv = GtkJuliaColumnViewColumn(payloads, info.name, () -> GtkLabel(""), (l, p) -> on(t -> l[] = info.displaynum(p.packet[n]), p))
         Gtk4.setproperties!(cv, expand=true, resizable=true)
         append!(payload_cv, cv)
     end
@@ -142,7 +144,7 @@ function create_control_panel(gui)
     replayButton = buttonwithimage("Replay", GtkImage(icon_name = "media-record"))
     serialSelect = GtkComboBoxText(halign=Gtk4.Align_CENTER)
 
-    gui[:SerialPorts] = serialSelect
+    gui[:SerialPort] = serialSelect
     gui[:Replay] = replayButton
     gui[:Reset] = resetButton
 
@@ -176,14 +178,20 @@ end
 
 polyval(coeffs, x) = sum(i -> coeffs[i] * x ^ (i - 1), length(coeffs):-1:1)
 
-readn(io, t::Type) = ntoh(read(io, t))
-readn(io, t::Type, count::Integer) = ntoh.(reinterpret(t, read(io, sizeof(t) * count)))
+readn(io, t::Type) = ltoh(read(io, t))
+readn(io, t::Type, count::Integer) = ltoh.(reinterpret(t, read(io, sizeof(t) * count)))
+
+function Base.empty!(ax::Axis3)
+    while !isempty(ax.scene.plots)
+        delete!(ax.scene, ax.scene.plots[end])
+    end
+end
 
 function reset(gui)
     empty!(payloads)
     empty!(ids2payloads)
-    empty!(gui[:Ax3])
-    foreach(i -> i.plotType == LinePlot && empty!(i.plot), information)
+    Makie.empty!(gui[:Ax3])
+    foreach(i -> i.plotType == AltLinePlot && empty!(i.plot), information)
     init_plot(gui)
 end
 
@@ -198,7 +206,7 @@ function gui_main()
     end
 
     on(serial) do c
-        c || (gui[:SerialPorts].active = -1)
+        c || (gui[:SerialPort].active = -1)
         println("Device Connected: $c")
     end
 
@@ -210,7 +218,7 @@ function gui_main()
                     data = zeros(UInt8, TotalPacketLength)
                     while !eof(f)
                         readbytes!(s, data, TotalPacketLength)
-                        ondata(data)
+                        ondata(data, gui)
                     end
                 end
             end
@@ -218,11 +226,12 @@ function gui_main()
     end
 
     on(r -> reset(gui), gui[:Reset])
+    on(s -> setport(serial, s[]), gui[:SerialPort])
 
     on(PortsObservable; update=true) do p
         isopen(serial) && return
-        empty!(gui[:SerialPorts])
-        append!(gui[:SerialPorts], p)
+        empty!(gui[:SerialPort])
+        append!(gui[:SerialPort], p)
     end
 
     function create_payload(name, color)
@@ -234,9 +243,9 @@ function gui_main()
     while true
         try
             isopen(serial) && readport(serial) do data
-                file === nothing || (file = open(Dates.format(now(), "data/data_mm-dd-yyyy_HH-MM-SS.bin"), "w"))
+                file === nothing && (file = open(Dates.format(now(), "data/data_mm-dd-yyyy_HH-MM-SS.bin"), "w"))
                 write(file, data)
-                ondata(data)
+                ondata(data, gui)
             end
         catch e
            # showerror(stdout, e)
@@ -247,18 +256,16 @@ function gui_main()
     end
 end
 
-function ondata(data)
+function ondata(data, gui)
     io = IOBuffer(data)
-
     header = readn(io, UInt16)
-    id = (header & 0xFFF0 - 43664) << 4                                 #Clear last 4 bytes. (Number of Sats)
+    id = (header & 0xFFF0 - 43664) >> 4 + 1                              #Clear last 4 bytes. (Number of Sats)
     sat = header & 0x000F
 
     alt, lat, lon = readn(io, Float32, 3)
     temp, press = Float32.(readn(io, UInt16, 2))
     packNum, utcSec, utcMin, utcHour = readn(io, UInt8, 4)
-    rssi = readn(io, Int32)
-    tmpheader & 0x000F
+    rssi = Float32(ntoh(read(io, Int32)))                                #Why Is This Big Endian And Everything Else Is Little????
 
     alt /= 1000                                                          #km
 
@@ -287,7 +294,7 @@ function ondata(data)
     end
 
     p.packet = Float32[time, lon, lat, alt, temp, press, aVel, nVel, hVel, eVel, rssi, sat]
-    p.packet_time[] = time
+    p.observable[] = alt                    #Updates all plots
 end
 
 gui_main()
