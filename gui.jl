@@ -11,36 +11,24 @@ const ThermCoefficients = [1.07245334681955e-07, 1.61138531293258e-06, 0.0002471
 const ColorMap = [:blue, :red, :green, :cyan, :magenta, :yellow]
 const EarthRadius = 6378100
 const MaxAltitude = 100
+const Location = (-81.042343, 29.198796)
+const LocationWidth = .1
+const LocationWidth = .1
+
+const LocationArea = (Location[1] - LocationWidth, Location[2] - LocationWidth, Location[1] + LocationWidth, Location[2] + LocationWidth) 
 
 RunningTime = now()
 runningtime() = Dates.value(now() - RunningTime) * 1E-3
-resettime() = global RunningTime = now()
-
-@enum PlotType begin
-    NoPlot
-    AltLinePlot
-end
-
-#Override the stream reader to read fixed length chunks
-struct FixedLengthReader length::Integer end
-function Base.take!(r::FixedLengthReader, data, len)
-    if length(data) >= r.length
-        len[] = r.length
-        return data[1:r.length]
-    end
-    return nothing
-end
 
 mutable struct Information
     name::String
-    plotType::PlotType
     plot
     plot_pos
     displaynum
 
     displayf32num(n) = round(n, digits=2)
-    Information(name, plotType, plos_pos, displaynum = displayf32num) = new(name, plotType, nothing, plos_pos, displaynum)
-    Information(name, displaynum = displayf32num) = new(name, NoPlot, nothing, displaynum)
+    Information(name, plot_pos::Tuple, displaynum = displayf32num) = new(name, nothing, plot_pos, displaynum)
+    Information(name, displaynum = displayf32num) = new(name, nothing, nothing, displaynum)
 end
 
 mutable struct Payload
@@ -55,47 +43,41 @@ mutable struct Payload
     Observables.on(f, p::Payload) = on(f, p.observable)
 end
 
-information = [Information("Time", t -> Dates.format(DateTime(Int(t), UTC), "HH::MM::SS")),  Information("Longitude"),          Information("Latitude"), 
-               Information("Altitude [km]"),                             Information("Temp [∘C]", AltLinePlot, (1, 1)),         Information("Pressure [atm]", AltLinePlot, (1, 2)),      
-               Information("Ascent Vel [m/s]", AltLinePlot, (2, 1)),     Information("North Vel [m/s]", AltLinePlot, (2, 2)),   Information("Horiz Vel [m/s]", AltLinePlot, (3, 1)),
-               Information("EastVel", AltLinePlot, (3, 2)),              Information("RSSI"),                                   Information("Sat", Int)]
-
-payloads = GtkJuliaList(Payload[])     
-ids2payloads = Dict{Int, Payload}()  
-center = (-81.022833, 29.210815)
-w = .025
-area = (center[1] - w, center[2] - w, center[1] + w, center[2] + w)
-zoom = 10.5
+const payloads = GtkJuliaList(Payload[])     
+const ids2payloads = Dict{Int, Payload}() 
+const information = [Information("Time", t -> Dates.format(DateTime(Int(t), UTC), "HH::MM::SS")),  Information("Longitude"), Information("Latitude"), 
+                     Information("Altitude [km]"),                Information("Temp [∘C]", (1, 1)),         Information("Pressure [atm]", (1, 2)),      
+                     Information("Ascent Vel [m/s]", (2, 1)),     Information("North Vel [m/s]", (2, 2)),   Information("Horiz Vel [m/s]", (3, 1)),
+                     Information("EastVel [m/s]", (3, 2)),        Information("RSSI"),                      Information("Sat", Int)]
 
 function init_plot(gui)
-    mesh!(gui[:Ax3], Rect(Vec(center[1] - w, center[2] - w, 0), Vec(2w, 2w, 0)), color=load("test.png"))
+    mesh!(gui[:SAx3], Rect(Vec(LocationArea[1:2]..., 0), Vec(2LocationWidth, 2LocationWidth, 0)), color = download_map(Location, LocationArea; pitch=45, filename="imgcache/streetimage45"))
+    mesh!(gui[:SAx2], Rect(Vec(LocationArea[1:2]...), Vec(2LocationWidth, 2LocationWidth)), color = reverse!(download_map(Location, LocationArea; pitch=0, filename="imgcache/streetimage"), dims=1))
 end
 
-function create_plot(plots, plot3d, gui)
+function create_plot(spatialplots, infoplots, gui)
     set_theme!(theme_hypersphere())
-    fig = Figure()
-    fig3D = Figure()
+    infoFig = Figure()
+    spatialFig = Figure()
 
     for info in information
-        if info.plotType == AltLinePlot
-            info.plot = Axis(fig[info.plot_pos...], xlabel = info.name, ylabel = "Altitude [km]")
-        end
+        info.plot_pos === nothing || (info.plot = Axis(infoFig[info.plot_pos...], xlabel=info.name, ylabel="Altitude [km]"))
     end
 
-    ax3 = Axis3(fig3D[1, 1], xlabel="", ylabel="", zlabel="")
-    gui[:Ax3] = ax3
+    ax3 = Axis3(spatialFig[1, 1], xlabel="", ylabel="", zlabel="")
+    ax2 = Axis(spatialFig[1, 2], xlabel="", ylabel="")
+    gui[:SAx3] = ax3
+    gui[:SAx2] = ax2
     init_plot(gui)
-    limits!(ax3, Rect(Vec(center[1] - w, center[2] - w, 0), Vec(2w, 2w, MaxAltitude)))
+    limits!(ax3, Rect(Vec(LocationArea[1:2]..., 0), Vec(2LocationWidth, 2LocationWidth, MaxAltitude)))
+    limits!(ax2, Rect(Vec(LocationArea[1:2]...), Vec(2LocationWidth, 2LocationWidth)))
     
-    screen = GtkGLScreen(plots)
-    screen3d = GtkGLScreen(plot3d)
-    display(screen, fig)
-    display(screen3d, fig3D)
+    foreach(p -> display(GtkGLScreen(p[1]), p[2]), [spatialplots => infoFig, infoplots => spatialFig])
 
     gui[:connect_payload_to_plots] = function connect_payload_to_plots(p::Payload)
         for idx in eachindex(information)
             info = information[idx]
-            if info.plotType == AltLinePlot
+            if info.plot_pos !== nothing
                 plot_data = Observable(Point2f[])
                 lines!(info.plot, plot_data, color=p.color, label=p.name)
                 on(p) do a
@@ -106,13 +88,16 @@ function create_plot(plots, plot3d, gui)
             end
         end
         
-        pos = Observable(Point3f(0))
+        pos3 = Observable(Point3f(0))
+        pos2 = Observable(Point2f(0))
         apos = Observable(Point3f[])
-        scatter!(ax3, pos, color=p.color, markersize=25, label=p.name)                        #Sphere    
-        lines!(ax3, apos; color=p.color)                                                      #Trajectory
+        scatter!(ax3, pos3, color=p.color, markersize=25, label=p.name)
+        scatter!(ax2, pos2, color=p.color, markersize=25, label=p.name)
+        lines!(ax3, apos; color=p.color)                                                               #Trajectory
         on(p) do a
-            pos[] = Point3f(p.packet[2], p.packet[3], p.packet[4])
-            push!(apos[], pos[])
+            pos3[] = Point3f(p.packet[2], p.packet[3], p.packet[4])
+            pos2[] = Point2f(p.packet[2], p.packet[3])
+            push!(apos[], pos3[])
             notify(apos)
         end
     end
@@ -121,14 +106,12 @@ end
 function create_column_view()
     payload_cv = GtkColumnView(GtkSelectionModel(GtkSingleSelection(Gtk4.GListModel(payloads))), reorderable=true, hexpand=true, vexpand=true)
 
-    cv = GtkJuliaColumnViewColumn(payloads, "ID", () -> GtkLabel(""), (l, p) -> Gtk4.markup(l, "<span foreground=\"$(p.color)\">$(p.name)</span>"))     #Set Text Color
-    Gtk4.setproperties!(cv, expand=true, resizable=true)
+    cv = GtkJuliaColumnViewColumn(payloads, "ID", () -> GtkLabel(""), (l, p) -> Gtk4.markup(l, "<span foreground=\"$(p.color)\">$(p.name)</span>"), expand=true, resizable=true)     #Set Text Color
     append!(payload_cv, cv)
     
     for n in eachindex(information)
         info = information[n]
-        cv = GtkJuliaColumnViewColumn(payloads, info.name, () -> GtkLabel(""), (l, p) -> on(t -> l[] = info.displaynum(p.packet[n]), p))
-        Gtk4.setproperties!(cv, expand=true, resizable=true)
+        cv = GtkJuliaColumnViewColumn(payloads, info.name, () -> GtkLabel(""), (l, p) -> on(t -> l[] = info.displaynum(p.packet[n]), p), expand=true, resizable=true)
         append!(payload_cv, cv)
     end
 
@@ -137,26 +120,32 @@ function create_column_view()
     return sw
 end
 
-function create_control_panel(gui)
-    control_box = GtkBox(:h)
+function create_control_panel(gui, replaySpeed)
+    control_box = GtkGrid(column_homogeneous=true)
     
-    resetButton = buttonwithimage("Reset", GtkImage(icon_name = "system-reboot"))
-    replayButton = buttonwithimage("Replay", GtkImage(icon_name = "media-record"))
+    resetButton = buttonwithimage("Reset", GtkImage(icon_name="system-reboot"))
+    replayButton = buttonwithimage("Replay", GtkImage(icon_name="media-record"))
     serialSelect = GtkComboBoxText(halign=Gtk4.Align_CENTER)
+    replaySpeedSlider = GtkScale(:h, .25:.5:100)
+    Observables.ObservablePair(replaySpeedSlider, replaySpeed)
 
     gui[:SerialPort] = serialSelect
     gui[:Replay] = replayButton
     gui[:Reset] = resetButton
 
-    append!(control_box, makewidgetwithtitle(serialSelect, "Serial Port"), replayButton, resetButton)
+    control_box[1, 1] = makewidgetwithtitle(serialSelect, "Serial Port")
+    control_box[2, 1] = replayButton
+    control_box[3, 1] = resetButton
+    control_box[1:3, 2] = makewidgetwithtitle(replaySpeedSlider, lift(s -> "Replay Speed (x$(round(s, digits=2)))", replaySpeed))
+
     return control_box
 end
 
-function create_gui()
+function create_gui(replaySpeed)
     gui = Dict{Symbol, Any}()
 
-    plot3d = GtkGLArea(hexpand=true, vexpand=true)
-    plots = GtkGLArea(hexpand=true, vexpand=true)
+    spatialplots = GtkGLArea(hexpand=true, vexpand=true)
+    infoplots = GtkGLArea(hexpand=true, vexpand=true)
 
     win = GtkWindow("MURI")
     gui[:Window] = win
@@ -165,12 +154,12 @@ function create_gui()
     grid = GtkGrid(column_homogeneous=true)
     win[] = grid
 
-    grid[1, 1:3] = plots
+    grid[1, 1:3] = infoplots
     grid[2, 1] = create_column_view()
-    grid[2, 2] = create_control_panel(gui)
-    grid[2, 3] = plot3d
+    grid[2, 2] = create_control_panel(gui, replaySpeed)
+    grid[2, 3] = spatialplots
 
-    create_plot(plots, plot3d, gui)
+    create_plot(infoplots, spatialplots, gui)
     display_gui(win; blocking=false)
 
     return gui
@@ -181,23 +170,18 @@ polyval(coeffs, x) = sum(i -> coeffs[i] * x ^ (i - 1), length(coeffs):-1:1)
 readn(io, t::Type) = ltoh(read(io, t))
 readn(io, t::Type, count::Integer) = ltoh.(reinterpret(t, read(io, sizeof(t) * count)))
 
-function Base.empty!(ax::Axis3)
-    while !isempty(ax.scene.plots)
-        delete!(ax.scene, ax.scene.plots[end])
-    end
-end
-
 function reset(gui)
     empty!(payloads)
     empty!(ids2payloads)
-    Makie.empty!(gui[:Ax3])
-    foreach(i -> i.plotType == AltLinePlot && empty!(i.plot), information)
+    Makie.empty!(gui[:SAx3])
+    foreach(i -> i.plot === nothing || empty!(i.plot), information)
     init_plot(gui)
 end
 
 function gui_main()
     file = nothing
-    gui = create_gui()
+    replaySpeed = Observable(1.0)
+    gui = create_gui(replaySpeed)
     serial = MicroControllerPort(:Serial, SerialBaudRate, FixedLengthReader(TotalPacketLength); nstopbits=1)
 
     signal_connect(gui[:Window], :close_request) do _
@@ -216,9 +200,17 @@ function gui_main()
                 reset(gui)
                 open(f, "r") do fp
                     data = zeros(UInt8, TotalPacketLength)
-                    while !eof(f)
-                        readbytes!(s, data, TotalPacketLength)
-                        ondata(data, gui)
+                    lastTime = nothing
+                    while readbytes!(fp, data, TotalPacketLength) == TotalPacketLength
+                        ondata(data, gui, function sleep_through_replay(p)
+                                            if lastTime === nothing
+                                                lastTime = p.packet[1]
+                                            else
+                                                newTime = max(p.packet[1], lastTime)
+                                                sleep((newTime - lastTime) / replaySpeed[])
+                                                lastTime = newTime
+                                            end
+                                          end)
                     end
                 end
             end
@@ -256,7 +248,7 @@ function gui_main()
     end
 end
 
-function ondata(data, gui)
+function ondata(data, gui, proc=(p)->())
     io = IOBuffer(data)
     header = readn(io, UInt16)
     id = (header & 0xFFF0 - 43664) >> 4 + 1                              #Clear last 4 bytes. (Number of Sats)
@@ -294,6 +286,7 @@ function ondata(data, gui)
     end
 
     p.packet = Float32[time, lon, lat, alt, temp, press, aVel, nVel, hVel, eVel, rssi, sat]
+    proc(p)
     p.observable[] = alt                    #Updates all plots
 end
 
