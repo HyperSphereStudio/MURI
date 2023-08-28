@@ -2,7 +2,7 @@
 /////////////********************* Main Variable Definitions **********************///////////////
 /////////////////////////////////////////////////////////////////////////////////////////////////
 // *********** RADIO **************//
-#define RADIO_BAUD 230400
+#define RADIO_BAUD 19200
 #define RADIO_SIZE 19 // Change this to change the packet size of a single GPSsonde trnasmission - Change this with the GPSONDE code
 #define RF95_FREQ 915.0
 byte buf[3];

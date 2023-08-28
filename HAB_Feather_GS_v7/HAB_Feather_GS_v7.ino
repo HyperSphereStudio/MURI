@@ -36,7 +36,6 @@ void setup() {
     while (1);
   }
 
-
   rf95.setTxPower(20, false);
   // You can change the modulation parameters with eg
   rf95.setModemConfig(RH_RF95::Bw125Cr48Sf4096);   // Min Bw - Max Sfr for max range

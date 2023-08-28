@@ -34,6 +34,7 @@ void sendDataRadio() {
   tempCounts = analogRead(TEMP_PIN);
   dataPack[14] = tempCounts;
   dataPack[15] = tempCounts >> 8;
+
 //  /****** PRESSURE *******/
     pressure = baro.readPressure();
     presdata = pressure*PRESSURE_CONVERSION;
@@ -47,10 +48,5 @@ void sendDataRadio() {
   //extra useable bytes. 20 byte max for 2Hz datarate
 
   rf95.send(dataPack, RADIO_SIZE);    //transmit the packet using LoRa radio
-  for (int i = 0; i < RADIO_SIZE; i++) {  //display the packet in hex
-    Serial.print(dataPack[i], HEX); Serial.print(" ");
-  }
-  Serial.write("\n");
   delay(10);
-  
 }

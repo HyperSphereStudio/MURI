@@ -4,7 +4,7 @@
 
 // packet header
 uint16_t id_erau = 0b101010101 << 7;             // 9 bit Header for packet
-uint16_t payloadID = 3;                     //ID number of the payload. unique idsentifier for each payload being flown
+uint16_t payloadID = 5;                     //ID number of the payload. unique idsentifier for each payload being flown
 uint16_t packNum;                            // Packet number counter 
 uint16_t header = id_erau | (payloadID << 4);
 

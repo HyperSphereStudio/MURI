@@ -87,8 +87,7 @@ void loop() {
       }
     }
   } 
-  Serial.println(tempCounts, HEX);  //display temperature counts
-  Serial.println(utcSec);
+  Serial.println(tempCounts, DEC);  //display temperature counts
   // Send Packet based on timed interval i.e. modulus of timer with sync number
   delay(100);
   

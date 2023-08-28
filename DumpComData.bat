@@ -1,17 +1,12 @@
 @echo off
 
+::dontincludeheader Session should have include header set false!
+
 :PortSet
-chgport
+reg query HKLM\HARDWARE\DEVICEMAP\SERIALCOMM
 set /p "port=Enter COM Port(Or Enter to Reprint Ports): " 
 if [%port%] == [] goto PortSet
 
-set file=%date%_%time%.bin
-set file=%file:/=_%
-set file=%file::=_%
-set file=data/%file: =-%
-
-echo Writing to File: %port% to %file%
-mode %port% baud=19200 parity=n stop=1 data=8
-type %port%: >> "%file%"
+putty -load dontincludeheader -serial %port% -sessionlog "%~dp0data/&Y_&M_&D_&T.bin" -sercfg 19200,8,1,n,N
 echo Ended Writing To File!
 pause

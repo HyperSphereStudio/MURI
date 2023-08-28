@@ -188,23 +188,21 @@ function gui_main()
                 open(f, "r", lock=false) do fp
                     data = zeros(UInt8, TotalPacketLength)
 					offset = 1
-                    lastTime = nothing
+                    lastTime = 0
                     try
-                        @label top
-						#Read from data file and try to read line from it or wait
-						offset += readbytes!(fp, @view(data[offset:end]), TotalPacketLength - offset + 1)
-                        while offset == TotalPacketLength + 1
-                            p = ondata(data, gui)
-                            if lastTime === nothing
-                                lastTime = p.packet[1]
-                            else
+                        while streamMode[] || !eof(fp)
+                            #Read from data file and try to read line from it or wait
+						    offset += readbytes!(fp, @view(data[offset:end]), TotalPacketLength - offset + 1)
+                            if offset == TotalPacketLength + 1
+                                p = ondata(data, gui)
                                 newTime = max(p.packet[1], lastTime)
+                                lastTime == 0 && (lastTime = newTime)
                                 streamMode[] || sleep((newTime - lastTime) / replaySpeed[])
                                 lastTime = newTime
-                            end     
-							offset = 1
+							    offset = 1
+                            end
+                            sleep(.1)
                         end
-                        streamMode[] && (sleep(.1); @goto top)
                     catch e
                         showerror(stdout, e)
                         rethrow(e)
@@ -222,7 +220,7 @@ readl(io::IO, ::Type{T}) where T <: Number = ltoh(read(io, T))
 readl(io::IO, T::Type) = read(io, T)
 readl(io::IO, Types::Type...) = [readl(io, T) for T in Types]
 readl(io::IO, T::Type, count::Integer) = [readl(io, T) for i in 1:count]
-polyval(coeffs, x) = sum(i -> coeffs[i] * x ^ (i - 1), length(coeffs):-1:1)
+polyval(coeffs, x) = sum(i -> coeffs[end-i+1] * x ^ (i-1), eachindex(coeffs))
 Base.getindex(g::GtkCheckButton, ::Type{Bool}) = g.active
 Base.setindex!(g::GtkCheckButton, v) = g.active = v
 JuliaSAILGUI.on_update_signal_name(::GtkCheckButton) = "toggled"
@@ -242,9 +240,7 @@ function ondata(data, gui)
     alt /= 1000                                                          #km
 
     temp /= 65535                                                        #Normalized Voltage
-    println("n:", temp)
     temp = temp * ThermResistence / (1 - temp)                           #Convert to Thermistor Resistance
-    println("r:", temp)
     temp = 1 / polyval(ThermCoefficients, log(temp)) - 273.15            #Temperature
 
     press /= 0.537392*101625
@@ -254,6 +250,7 @@ function ondata(data, gui)
 
     if !haskey(ids2payloads, id)
         p = Payload(string(id), ColorMap[id])
+        p.packet[2:3] .= Location
         ids2payloads[id] = p
         push!(payloads, p)
         gui[:connect_payload_to_plots](p)
@@ -269,7 +266,7 @@ function ondata(data, gui)
 
         #Dont trigger plot for a couple cycles to allow for better calc
         #Filter out small delta T's (could have rapid sent packet)
-        shouldObserve = packNum >= 4 && ΔTime >= 1
+        shouldObserve = packNum >= 3 && ΔTime >= 1
     end
 
     p.packet = Float32[time, lon, lat, alt, temp, press, aVel, nVel, hVel, eVel, rssi, sat]
