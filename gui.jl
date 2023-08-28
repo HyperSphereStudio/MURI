@@ -1,18 +1,15 @@
 using JuliaSAILGUI
 using Dates, Downloads
-using JuliaSAILGUI: DataFrames, Observables, LibSerialPort, CSV, GLMakie, GeometryBasics, Gtk4, FileIO
+using JuliaSAILGUI: DataFrames, Observables, CSV, GLMakie, GeometryBasics, Gtk4, FileIO
 
 include("gui_utils.jl")
 
-const SerialBaudRate = 230400
 const TotalPacketLength = 27
 const ThermResistence = 200
 const ThermCoefficients = [1.07245334681955e-07, 1.61138531293258e-06, 0.000247173445828048, 0.00277515898838713]
 const ColorMap = [:blue, :red, :green, :cyan, :magenta, :yellow]
 const EarthRadius = 6378100
-const MaxAltitude = 100
 const Location = (-81.042343, 29.198796)
-const LocationWidth = .1
 const LocationWidth = .1
 
 const LocationArea = (Location[1] - LocationWidth, Location[2] - LocationWidth, Location[1] + LocationWidth, Location[2] + LocationWidth) 
@@ -36,18 +33,17 @@ mutable struct Payload
     color
     observable          #Holds the altitude just for ease of use
     packet
-    prevpacket
 
-    Payload(name, color) = new(name, color, Observable(0.0), zeros(Float64, length(information)), zeros(Float64, length(information)))
+    Payload(name, color) = new(name, color, Observable(0.0), zeros(Float64, length(information)))
     Observables.notify(p::Payload) = notify(p.observable)
     Observables.on(f, p::Payload) = on(f, p.observable)
 end
 
 const payloads = GtkJuliaList(Payload[])     
 const ids2payloads = Dict{Int, Payload}() 
-const information = [Information("Time", t -> Dates.format(DateTime(Int(t), UTC), "HH::MM::SS")),  Information("Longitude"), Information("Latitude"), 
+const information = [Information("Time", t -> Dates.format(Time(0) + Second(t), "HH::MM::SS")),  Information("Longitude"), Information("Latitude"), 
                      Information("Altitude [km]"),                Information("Temp [∘C]", (1, 1)),         Information("Pressure [atm]", (1, 2)),      
-                     Information("Ascent Vel [m/s]", (2, 1)),     Information("North Vel [m/s]", (2, 2)),   Information("Horiz Vel [m/s]", (3, 1)),
+                     Information("Ascent V [m/s]", (2, 1)),     Information("North V [m/s]", (2, 2)),   Information("Horiz V [m/s]", (3, 1)),
                      Information("EastVel [m/s]", (3, 2)),        Information("RSSI"),                      Information("Sat", Int)]
 
 function init_plot(gui)
@@ -69,10 +65,12 @@ function create_plot(spatialplots, infoplots, gui)
     gui[:SAx3] = ax3
     gui[:SAx2] = ax2
     init_plot(gui)
-    limits!(ax3, Rect(Vec(LocationArea[1:2]..., 0), Vec(2LocationWidth, 2LocationWidth, MaxAltitude)))
+
+    limits!(ax3, Rect(Vec(LocationArea[1:2]..., 0), Vec(2LocationWidth, 2LocationWidth, 100)))
     limits!(ax2, Rect(Vec(LocationArea[1:2]...), Vec(2LocationWidth, 2LocationWidth)))
     
-    foreach(p -> display(GtkGLScreen(p[1]), p[2]), [spatialplots => infoFig, infoplots => spatialFig])
+    display(GtkGLScreen(spatialplots), infoFig)
+    display(GtkGLScreen(infoplots), spatialFig)
 
     gui[:connect_payload_to_plots] = function connect_payload_to_plots(p::Payload)
         for idx in eachindex(information)
@@ -97,6 +95,7 @@ function create_plot(spatialplots, infoplots, gui)
         on(p) do a
             pos3[] = Point3f(p.packet[2], p.packet[3], p.packet[4])
             pos2[] = Point2f(p.packet[2], p.packet[3])
+            autolimits!(ax3)
             push!(apos[], pos3[])
             notify(apos)
         end
@@ -105,7 +104,6 @@ end
 
 function create_column_view()
     payload_cv = GtkColumnView(GtkSelectionModel(GtkSingleSelection(Gtk4.GListModel(payloads))), reorderable=true, hexpand=true, vexpand=true)
-
     cv = GtkJuliaColumnViewColumn(payloads, "ID", () -> GtkLabel(""), (l, p) -> Gtk4.markup(l, "<span foreground=\"$(p.color)\">$(p.name)</span>"), expand=true, resizable=true)     #Set Text Color
     append!(payload_cv, cv)
     
@@ -120,55 +118,49 @@ function create_column_view()
     return sw
 end
 
-function create_control_panel(gui, replaySpeed)
+function create_control_panel(gui, replaySpeed, streamMode)
     control_box = GtkGrid(column_homogeneous=true)
     
-    resetButton = buttonwithimage("Reset", GtkImage(icon_name="system-reboot"))
-    replayButton = buttonwithimage("Replay", GtkImage(icon_name="media-record"))
-    serialSelect = GtkComboBoxText(halign=Gtk4.Align_CENTER)
+    streamButton = GtkCheckButton("Stream")
+  #  stopButton = buttonwithimage("Stop", GtkImage(icon_name="media-playback-stop"))
+    replayButton = buttonwithimage("Play", GtkImage(icon_name="media-playback-start"))
     replaySpeedSlider = GtkScale(:h, .25:.5:100)
     Observables.ObservablePair(replaySpeedSlider, replaySpeed)
+    Observables.ObservablePair(streamButton, streamMode)
 
-    gui[:SerialPort] = serialSelect
+    gui[:Stream] = streamButton
     gui[:Replay] = replayButton
-    gui[:Reset] = resetButton
+   # gui[:Stop] = stopButton
 
-    control_box[1, 1] = makewidgetwithtitle(serialSelect, "Serial Port")
-    control_box[2, 1] = replayButton
-    control_box[3, 1] = resetButton
-    control_box[1:3, 2] = makewidgetwithtitle(replaySpeedSlider, lift(s -> "Replay Speed (x$(round(s, digits=2)))", replaySpeed))
+    control_box[1, 1] = replayButton
+   # control_box[2, 1] = stopButton
+    control_box[1, 2] = streamButton
+    control_box[2:3, 2] = makewidgetwithtitle(replaySpeedSlider, lift(s -> "Play Speed (x$(round(s, digits=2)))", replaySpeed))
 
     return control_box
 end
 
-function create_gui(replaySpeed)
+function create_gui(replaySpeed, streamMode)
     gui = Dict{Symbol, Any}()
 
     spatialplots = GtkGLArea(hexpand=true, vexpand=true)
     infoplots = GtkGLArea(hexpand=true, vexpand=true)
 
-    win = GtkWindow("MURI")
+    win = GtkWindow("GPS Sonde GUI")
     gui[:Window] = win
-    maximize(win)
 
     grid = GtkGrid(column_homogeneous=true)
     win[] = grid
 
     grid[1, 1:3] = infoplots
     grid[2, 1] = create_column_view()
-    grid[2, 2] = create_control_panel(gui, replaySpeed)
+    grid[2, 2] = create_control_panel(gui, replaySpeed, streamMode)
     grid[2, 3] = spatialplots
 
     create_plot(infoplots, spatialplots, gui)
-    display_gui(win; blocking=false)
 
     return gui
 end
-
-polyval(coeffs, x) = sum(i -> coeffs[i] * x ^ (i - 1), length(coeffs):-1:1)
-
-readn(io, t::Type) = ltoh(read(io, t))
-readn(io, t::Type, count::Integer) = ltoh.(reinterpret(t, read(io, sizeof(t) * count)))
 
 function reset(gui)
     empty!(payloads)
@@ -181,93 +173,84 @@ end
 function gui_main()
     file = nothing
     replaySpeed = Observable(1.0)
-    gui = create_gui(replaySpeed)
-    serial = MicroControllerPort(:Serial, SerialBaudRate, FixedLengthReader(TotalPacketLength); nstopbits=1)
+    streamMode = Observable(false)
+    gui = create_gui(replaySpeed, streamMode)
 
     signal_connect(gui[:Window], :close_request) do _
         file === nothing || close(file)
         exit(0)
     end
 
-    on(serial) do c
-        c || (gui[:SerialPort].active = -1)
-        println("Device Connected: $c")
-    end
-
     on(gui[:Replay]) do r
         open_dialog("Open Replay File", nothing, ["*.bin"]; start_folder="data") do f
             @async begin 
                 reset(gui)
-                open(f, "r") do fp
+                open(f, "r", lock=false) do fp
                     data = zeros(UInt8, TotalPacketLength)
+					offset = 1
                     lastTime = nothing
-                    while readbytes!(fp, data, TotalPacketLength) == TotalPacketLength
-                        ondata(data, gui, function sleep_through_replay(p)
-                                            if lastTime === nothing
-                                                lastTime = p.packet[1]
-                                            else
-                                                newTime = max(p.packet[1], lastTime)
-                                                sleep((newTime - lastTime) / replaySpeed[])
-                                                lastTime = newTime
-                                            end
-                                          end)
-                    end
+                    try
+                        @label top
+						#Read from data file and try to read line from it or wait
+						offset += readbytes!(fp, @view(data[offset:end]), TotalPacketLength - offset + 1)
+                        while offset == TotalPacketLength + 1
+                            p = ondata(data, gui)
+                            if lastTime === nothing
+                                lastTime = p.packet[1]
+                            else
+                                newTime = max(p.packet[1], lastTime)
+                                streamMode[] || sleep((newTime - lastTime) / replaySpeed[])
+                                lastTime = newTime
+                            end     
+							offset = 1
+                        end
+                        streamMode[] && (sleep(.1); @goto top)
+                    catch e
+                        showerror(stdout, e)
+                        rethrow(e)
+                    end   
                 end
             end
         end
     end
 
-    on(r -> reset(gui), gui[:Reset])
-    on(s -> setport(serial, s[]), gui[:SerialPort])
-
-    on(PortsObservable; update=true) do p
-        isopen(serial) && return
-        empty!(gui[:SerialPort])
-        append!(gui[:SerialPort], p)
-    end
-
-    function create_payload(name, color)
-        p = Payload(name, color)
-        gui[:connect_payload_to_plots](p)
-        return p
-    end
-
-    while true
-        try
-            isopen(serial) && readport(serial) do data
-                file === nothing && (file = open(Dates.format(now(), "data/data_mm-dd-yyyy_HH-MM-SS.bin"), "w"))
-                write(file, data)
-                ondata(data, gui)
-            end
-        catch e
-           # showerror(stdout, e)
-            close(serial)
-            rethrow(e)
-        end
-        sleep(1E-1)
-    end
+    maximize(gui[:Window])
+    display_gui(gui[:Window])
 end
 
-function ondata(data, gui, proc=(p)->())
+readl(io::IO, ::Type{T}) where T <: Number = ltoh(read(io, T))
+readl(io::IO, T::Type) = read(io, T)
+readl(io::IO, Types::Type...) = [readl(io, T) for T in Types]
+readl(io::IO, T::Type, count::Integer) = [readl(io, T) for i in 1:count]
+polyval(coeffs, x) = sum(i -> coeffs[i] * x ^ (i - 1), length(coeffs):-1:1)
+Base.getindex(g::GtkCheckButton, ::Type{Bool}) = g.active
+Base.setindex!(g::GtkCheckButton, v) = g.active = v
+JuliaSAILGUI.on_update_signal_name(::GtkCheckButton) = "toggled"
+
+function ondata(data, gui)
     io = IOBuffer(data)
-    header = readn(io, UInt16)
+    header = readl(io, UInt16)
     id = (header & 0xFFF0 - 43664) >> 4 + 1                              #Clear last 4 bytes. (Number of Sats)
     sat = header & 0x000F
 
-    alt, lat, lon = readn(io, Float32, 3)
-    temp, press = Float32.(readn(io, UInt16, 2))
-    packNum, utcSec, utcMin, utcHour = readn(io, UInt8, 4)
-    rssi = Float32(ntoh(read(io, Int32)))                                #Why Is This Big Endian And Everything Else Is Little????
+    alt, lat, lon = readl(io, Float32, 3)
+    temp, press = Float32.(readl(io, UInt16, 2))
+    packNum, utcSec, utcMin, utcHour, numSatsGS = readl(io, UInt8, 5)
+
+    rssi = Float32(readl(io, Int32))                            
 
     alt /= 1000                                                          #km
 
-    temp = temp/65535                                                    #Normalized Voltage
+    temp /= 65535                                                        #Normalized Voltage
+    println("n:", temp)
     temp = temp * ThermResistence / (1 - temp)                           #Convert to Thermistor Resistance
+    println("r:", temp)
     temp = 1 / polyval(ThermCoefficients, log(temp)) - 273.15            #Temperature
 
     press /= 0.537392*101625
 
-    time = utcSec + 60 * utcMin + 3600 * utcHour
+    time = utcSec + 60*utcMin + 3600*utcHour
+    shouldObserve = true
 
     if !haskey(ids2payloads, id)
         p = Payload(string(id), ColorMap[id])
@@ -275,19 +258,24 @@ function ondata(data, gui, proc=(p)->())
         push!(payloads, p)
         gui[:connect_payload_to_plots](p)
         nVel, eVel, hVel, aVel = 0, 0, 0, 0  
+        shouldObserve = false
     else
         p = ids2payloads[id]
-        p.prevpacket = p.packet
         ΔTime, ΔLon, ΔLat, ΔAlt = [time, lon, lat, alt] .- p.packet[1:4]
         nVel = deg2rad(ΔLat) * (alt + EarthRadius) / ΔTime
         eVel = deg2rad(ΔLon) * (alt + EarthRadius) / ΔTime
         hVel = √(nVel^2 + eVel^2)
         aVel = ΔAlt / ΔTime
+
+        #Dont trigger plot for a couple cycles to allow for better calc
+        #Filter out small delta T's (could have rapid sent packet)
+        shouldObserve = packNum >= 4 && ΔTime >= 1
     end
 
     p.packet = Float32[time, lon, lat, alt, temp, press, aVel, nVel, hVel, eVel, rssi, sat]
-    proc(p)
-    p.observable[] = alt                    #Updates all plots
+    shouldObserve && (p.observable[] = alt)
+
+    return p
 end
 
 gui_main()
